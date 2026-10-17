@@ -1,3 +1,4 @@
 streamlit>=1.40,<2
 ytmusicapi>=1.10
 pandas>=2.2
+yt-dlp

@@ -1,4 +1,7 @@
-"""Text-to-YouTube-Music Playlist Assistant (Version 1)."""
+"""Playlist Assistant (Version 2).
+test youtube description: https://www.youtube.com/watch?v=5ZTjMGlF5v8&t=343s
+test youtube timeline: https://www.youtube.com/watch?v=OIPXLl6B7Cg
+"""
 
 from __future__ import annotations
 
@@ -13,6 +16,14 @@ from playlist_create import (
     PlaylistCreateError,
     build_authenticated_client,
     create_youtube_music_playlist,
+)
+from song_extraction import (
+    ORDER_ARTIST_TITLE,
+    ORDER_TITLE_ARTIST,
+    run_extraction,
+    songs_to_entries,
+    extract_from_description_comments,
+    dedupe_songs,
 )
 from search import search_candidates, SearchError
 
@@ -32,6 +43,10 @@ def init_state() -> None:
         "parse_version": 0,
         "playlist_result": None,
         "playlist_error": None,
+        "input_mode": "Text list",
+        "video_url": "https://www.youtube.com/watch?v=5ZTjMGlF5v8&t=343s",
+        "extraction": None,
+        "tracklist_format": "Song - Artist",
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -129,6 +144,7 @@ def search_one(track: dict[str, Any]) -> dict[str, Any]:
     return updated
 
 
+
 def render_candidate_label(candidate: dict[str, Any], index: int) -> str:
     title = candidate.get("title") or "(title unavailable)"
     artists = candidate.get("artists") or "(artist unavailable)"
@@ -136,31 +152,283 @@ def render_candidate_label(candidate: dict[str, Any], index: int) -> str:
     duration = candidate.get("duration") or "(duration unavailable)"
     return f"{index}. {title} — {artists} | {album} | {duration}"
 
+def reset_for_mode_change() -> None:
+    st.session_state.tracks = []
+    st.session_state.malformed = []
+    st.session_state.playlist_result = None
+    st.session_state.playlist_error = None
+    st.session_state.parse_version += 1
+    st.session_state.extraction = None
 
+def render_export(export_tracks: list[dict[str, Any]]) -> None:
+    csv_bytes = to_csv_bytes(st.session_state.tracks)
+    json_bytes = to_json_bytes(st.session_state.tracks)
+    dl1, dl2, _ = st.columns([1, 1, 2])
+    with dl1:
+        st.download_button("Download CSV", data=csv_bytes, file_name="playlist.csv",
+                           mime="text/csv", disabled=not export_tracks)
+    with dl2:
+        st.download_button("Download JSON", data=json_bytes, file_name="playlist.json",
+                           mime="application/json", disabled=not export_tracks)
+    if export_tracks:
+        st.dataframe(to_dataframe(st.session_state.tracks), hide_index=True)
+    else:
+        st.caption("Confirm and include at least one track to enable export.")
+
+
+def render_ytmusic_create(export_tracks: list[dict[str, Any]]) -> None:
+    st.info(
+        "This uses **ytmusicapi**, an unofficial integration that is not a Google-supported "
+        "YouTube Music playlist API. Compatibility is not guaranteed. Search and CSV/JSON "
+        "export do **not** require authentication."
+    )
+    st.markdown(
+        """
+Authentication files contain session secrets. **Do not share them or commit them to Git.**
+
+1. Read the current docs: [ytmusicapi documentation](https://ytmusicapi.readthedocs.io/).
+2. **Browser file (typical):** log into [music.youtube.com](https://music.youtube.com), copy request headers from an authenticated `browse` POST, then run `ytmusicapi browser` and save `browser.json`.
+3. **OAuth file:** as of late 2024 this also needs a Google Cloud OAuth client (TVs and Limited Input devices). Run `ytmusicapi oauth` to create `oauth.json`, then provide the client ID and secret below.
+"""
+    )
+    auth_file = st.file_uploader(
+        "Authentication JSON (browser.json or oauth.json)",
+        type=["json"],
+        help="Kept in memory for this request only. Never hardcoded.",
+    )
+    oauth_id = st.text_input("OAuth client ID (only if using oauth.json)")
+    oauth_secret = st.text_input("OAuth client secret (only if using oauth.json)", type="password")
+    playlist_title = st.text_input("Playlist title", value="Playlist Assistant")
+    playlist_description = st.text_area("Playlist description", value="")
+    privacy = st.selectbox("Privacy", options=list(PRIVACY_OPTIONS), index=0)
+
+    if st.button("Create YouTube Music playlist", disabled=not export_tracks):
+        st.session_state.playlist_result = None
+        st.session_state.playlist_error = None
+        if auth_file is None:
+            st.session_state.playlist_error = (
+                "Upload an authentication JSON file generated with ytmusicapi. "
+                "Search and export still work without it."
+            )
+            return
+        video_ids = [t["selected_video_id"] for t in export_tracks if t.get("selected_video_id")]
+        try:
+            client = build_authenticated_client(
+                auth_file.getvalue(),
+                client_id=oauth_id.strip() or None,
+                client_secret=oauth_secret.strip() or None,
+            )
+            st.session_state.playlist_result = create_youtube_music_playlist(
+                client, playlist_title, playlist_description, privacy, video_ids
+            )
+        except PlaylistCreateError as exc:
+            st.session_state.playlist_error = str(exc)
+        except Exception as exc:
+            st.session_state.playlist_error = (
+                f"Playlist creation failed ({exc.__class__.__name__}): {exc}"
+            )
+
+def render_extraction_results() -> None:
+    result = st.session_state.extraction
+
+    if not result:
+        return
+
+    if result.get("error"):
+        st.error(result["error"])
+        return
+
+    st.markdown(
+        f"**Video:** {result.get('title') or '(title unavailable)'}"
+    )
+    st.caption(f"URL: {result['url']}")
+
+    if result.get("fetch_error"):
+        st.error(
+            f"Video details could not be loaded: {result['fetch_error']}"
+        )
+
+    # Start with the methods already run by run_extraction().
+    display_methods = list(result.get("methods", []))
+
+    # Re-render Method 2 on every Streamlit rerun.
+    # This keeps the editable table visible when checkboxes or cells change.
+    meta = result.get("meta")
+    order = result.get("order", ORDER_TITLE_ARTIST)
+
+    if meta:
+        try:
+            method2_result = extract_from_description_comments(meta, order)
+            display_methods.append(method2_result)
+        except Exception as exc:
+            st.error(
+                "Description/comments extraction failed: "
+                f"{exc.__class__.__name__}: {exc}"
+            )
+    else:
+        # Show Method 2's failure if video metadata could not be loaded.
+        display_methods.append({
+            "label": "Description and comments",
+            "status": "failed",
+            "message": result.get(
+                "fetch_error",
+                "Video metadata is unavailable."
+            ),
+            "warnings": [],
+            "songs": [],
+        })
+
+    # Display the status of each extraction method.
+    for method in display_methods:
+        count = len(method.get("songs", []))
+
+        if method["status"] == "found":
+            st.success(
+                f"{method['label']}: {count} song(s) found"
+            )
+        elif method["status"] == "empty":
+            st.info(
+                f"{method['label']}: ran successfully but found no songs"
+            )
+        elif method["status"] == "failed":
+            st.error(
+                f"{method['label']}: failed. "
+                f"{method.get('message', 'Unknown error')}"
+            )
+        elif method["status"] == "review":
+            st.info(
+                f"{method['label']}: select the song lines you want "
+                "and confirm your selection below."
+            )
+        else:
+            st.caption(
+                f"{method['label']}: not implemented yet (placeholder)"
+            )
+
+        for warning in method.get("warnings", []):
+            st.warning(warning)
+
+    # Combine songs from all methods, including the current Method 2 state.
+    songs = dedupe_songs([
+        song
+        for method in display_methods
+        for song in method.get("songs", [])
+    ])
+
+    # Keep the saved result updated with the latest combined songs.
+    result["songs"] = songs
+
+    # Display the combined song list.
+    if songs:
+        st.markdown(
+            f"**Combined list: {len(songs)} song(s)** "
+            "(duplicates merged)"
+        )
+
+        st.dataframe(
+            [
+                {
+                    "#": i,
+                    "Title": song["title"],
+                    "Artist": song["artist"] or "—",
+                    "Timestamp": song["timestamp"] or "—",
+                    "Found by": ", ".join(song["sources"]),
+                }
+                for i, song in enumerate(songs, start=1)
+            ],
+            hide_index=True,
+        )
+    else:
+        st.warning(
+            "No songs were found by any implemented method. "
+            "Select and confirm songs in Method 2, or try another "
+            "video URL or switch Input source to Text list."
+        )
+
+    # Continue to song verification using the combined results.
+    if st.button(
+        "Continue to Song Verification",
+        type="primary",
+        disabled=not songs,
+        key="continue_verification",
+    ):
+        st.session_state.tracks = merge_tracks(
+            songs_to_entries(songs)
+        )
+        st.session_state.parse_version += 1
+        st.session_state.playlist_result = None
+        st.session_state.playlist_error = None
+        
 def main() -> None:
-    st.set_page_config(page_title="Text-to-YouTube-Music Playlist Assistant", layout="wide")
+    st.set_page_config(page_title="Playlist Assistant", layout="wide")
     init_state()
 
-    st.title("Text-to-YouTube-Music Playlist Assistant")
+    st.title("Playlist Assistant")
     st.caption(
         "Version 1 — paste a song list, search YouTube Music, confirm recordings, then export. "
         "Playlist creation uses the unofficial ytmusicapi library and is optional."
     )
 
     st.subheader("1. Input")
-    st.text_area(
-        "Paste songs (one per line)",
-        key="input_text",
-        height=180,
-        help="Formats: Song, Singer  |  Song - Singer  |  Song then Tab then Singer. Lines starting with # are comments.",
+    st.radio(
+        "Input source",
+        ["Text list", "YouTube link"],
+        horizontal=True,
+        key="input_mode",
+        on_change=reset_for_mode_change,
     )
-    if st.button("Parse song list", type="primary"):
-        valid, malformed = parse_song_list(st.session_state.input_text)
-        st.session_state.tracks = merge_tracks(valid)
-        st.session_state.malformed = [item.to_dict() for item in malformed]
-        st.session_state.parse_version += 1
-        st.session_state.playlist_result = None
-        st.session_state.playlist_error = None
+    mode = st.session_state.input_mode
+
+    if mode == "Text list":
+        st.text_area(
+            "Paste songs (one per line)",
+            key="input_text",
+            height=180,
+            help="Formats: Song, Singer  |  Song - Singer  |  Song then Tab then Singer. Lines starting with # are comments.",
+        )
+        if st.button("Parse song list", type="primary"):
+            valid, malformed = parse_song_list(st.session_state.input_text)
+            st.session_state.tracks = merge_tracks(valid)
+            st.session_state.malformed = [item.to_dict() for item in malformed]
+            st.session_state.parse_version += 1
+            st.session_state.playlist_result = None
+            st.session_state.playlist_error = None
+    else:
+        st.text_input(
+            "YouTube video URL",
+            key="video_url",
+            placeholder="https://www.youtube.com/watch?v=...",
+        )
+
+        st.selectbox(
+            "Tracklist format",
+            ["Song - Artist", "Artist - Song"],
+            key="tracklist_format",
+            help="How lines like '03:25 A - B' are split. You can still fix any entry during verification.",
+        )
+
+        if st.button("Extract songs", type="primary"):
+            order = (
+                ORDER_ARTIST_TITLE
+                if st.session_state.tracklist_format == "Artist - Song"
+                else ORDER_TITLE_ARTIST
+            )
+
+            with st.spinner("Inspecting video…"):
+                st.session_state.extraction = run_extraction(
+                    st.session_state.video_url,
+                    order,
+                )
+
+            st.session_state.tracks = []
+            st.session_state.malformed = []
+            st.session_state.parse_version += 1
+            st.session_state.playlist_result = None
+            st.session_state.playlist_error = None
+
+        # Render saved results on every Streamlit rerun.
+        if st.session_state.extraction:
+            render_extraction_results()
 
     malformed = st.session_state.malformed
     tracks = st.session_state.tracks
@@ -171,8 +439,7 @@ def main() -> None:
                 f"- Line {item['line_number']}: `{item['raw']}` — {item['error']}"
             )
     if tracks:
-        st.success(f"Parsed {len(tracks)} song(s). You can edit the text and parse again.")
-
+        st.success(f"Loaded {len(tracks)} song(s). You can edit the input and load again.")
     st.subheader("2. Search")
     st.write(
         "Searches run live against YouTube Music (unauthenticated). "
@@ -195,19 +462,31 @@ def main() -> None:
         status.empty()
         st.rerun()
 
-    tracks = st.session_state.tracks
-    searched = [t for t in tracks if t.get("searched")]
-    empty_results = [t for t in searched if not t.get("candidates") and not t.get("search_error")]
-    errored = [t for t in searched if t.get("search_error")]
-    if searched:
-        st.info(f"Live search finished for {len(searched)} of {len(tracks)} parsed song(s).")
-    if empty_results:
-        st.warning(
-            f"{len(empty_results)} song(s) returned no candidates. Edit the title/singer below and search again."
+        tracks = st.session_state.tracks
+        
+        st.subheader("2. Search")
+        st.write(
+            "Searches run live against YouTube Music (unauthenticated). "
+            "The first result is never selected automatically."
         )
-    if errored:
-        st.error(f"{len(errored)} search(es) failed. See details on each track.")
+        if st.button("Search YouTube Music for all parsed songs", disabled=not tracks):
+            ...  # existing search loop, unchanged, indented one level
+            st.rerun()
 
+        tracks = st.session_state.tracks
+        searched = [t for t in tracks if t.get("searched")]
+        empty_results = [t for t in searched if not t.get("candidates") and not t.get("search_error")]
+        errored = [t for t in searched if t.get("search_error")]
+        if searched:
+            st.info(f"Live search finished for {len(searched)} of {len(tracks)} parsed song(s).")
+        if empty_results:
+            st.warning(
+                f"{len(empty_results)} song(s) returned no candidates. Edit the title/singer below and search again."
+            )
+        if errored:
+            st.error(f"{len(errored)} search(es) failed. See details on each track.")
+
+    tracks = st.session_state.tracks
     st.subheader("3. Verification")
     st.write(
         "Select a candidate and tick **Confirm this recording**. "
@@ -373,91 +652,16 @@ def main() -> None:
 
     st.subheader("5. Export or create")
     export_tracks = verified_tracks(st.session_state.tracks)
-    csv_bytes = to_csv_bytes(st.session_state.tracks)
-    json_bytes = to_json_bytes(st.session_state.tracks)
-    dl1, dl2, _ = st.columns([1, 1, 2])
-    with dl1:
-        st.download_button(
-            "Download CSV",
-            data=csv_bytes,
-            file_name="playlist.csv",
-            mime="text/csv",
-            disabled=not export_tracks,
-        )
-    with dl2:
-        st.download_button(
-            "Download JSON",
-            data=json_bytes,
-            file_name="playlist.json",
-            mime="application/json",
-            disabled=not export_tracks,
-        )
-    if export_tracks:
-        st.dataframe(to_dataframe(st.session_state.tracks), hide_index=True)
+    dest = st.radio(
+        "What do you want to do?",
+        ["Export file", "Create YouTube Music playlist"],
+        horizontal=True,
+        key="destination",
+    )
+    if dest == "Export file":
+        render_export(export_tracks)
     else:
-        st.caption("Confirm and include at least one track to enable export.")
-
-    st.markdown("#### Optional: create a YouTube Music playlist")
-    st.info(
-        "This uses **ytmusicapi**, an unofficial integration that is not a Google-supported "
-        "YouTube Music playlist API. Compatibility is not guaranteed. Search and CSV/JSON "
-        "export do **not** require authentication."
-    )
-    st.markdown(
-        """
-Authentication files contain session secrets. **Do not share them or commit them to Git.**
-
-1. Read the current docs: [ytmusicapi documentation](https://ytmusicapi.readthedocs.io/).
-2. **Browser file (typical):** log into [music.youtube.com](https://music.youtube.com), copy request headers from an authenticated `browse` POST, then run `ytmusicapi browser` and save `browser.json`.
-3. **OAuth file:** as of late 2024 this also needs a Google Cloud OAuth client (TVs and Limited Input devices). Run `ytmusicapi oauth` to create `oauth.json`, then provide the client ID and secret below.
-"""
-    )
-
-    auth_file = st.file_uploader(
-        "Authentication JSON (browser.json or oauth.json)",
-        type=["json"],
-        help="Kept in memory for this request only. Never hardcoded.",
-    )
-    oauth_id = st.text_input("OAuth client ID (only if using oauth.json)", type="default")
-    oauth_secret = st.text_input("OAuth client secret (only if using oauth.json)", type="password")
-    playlist_title = st.text_input("Playlist title", value="Playlist Assistant")
-    playlist_description = st.text_area("Playlist description", value="")
-    privacy = st.selectbox("Privacy", options=list(PRIVACY_OPTIONS), index=0)
-
-    if st.button("Create YouTube Music playlist", disabled=not export_tracks):
-        st.session_state.playlist_result = None
-        st.session_state.playlist_error = None
-        if auth_file is None:
-            st.session_state.playlist_error = (
-                "Upload an authentication JSON file generated with ytmusicapi. "
-                "Search and export still work without it."
-            )
-        else:
-            video_ids = [
-                t["selected_video_id"]
-                for t in export_tracks
-                if t.get("selected_video_id")
-            ]
-            try:
-                client = build_authenticated_client(
-                    auth_file.getvalue(),
-                    client_id=oauth_id.strip() or None,
-                    client_secret=oauth_secret.strip() or None,
-                )
-                result = create_youtube_music_playlist(
-                    client,
-                    playlist_title,
-                    playlist_description,
-                    privacy,
-                    video_ids,
-                )
-                st.session_state.playlist_result = result
-            except PlaylistCreateError as exc:
-                st.session_state.playlist_error = str(exc)
-            except Exception as exc:
-                st.session_state.playlist_error = (
-                    f"Playlist creation failed ({exc.__class__.__name__}): {exc}"
-                )
+        render_ytmusic_create(export_tracks)
 
     if st.session_state.playlist_error:
         st.error(st.session_state.playlist_error)
