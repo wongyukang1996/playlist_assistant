@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import Any
 
 import streamlit as st
+import pandas as pd
 
 from export import duplicate_video_ids, to_csv_bytes, to_dataframe, to_json_bytes, verified_tracks
 from parser import parse_song_list
@@ -24,6 +25,9 @@ from song_extraction import (
     songs_to_entries,
     extract_from_description_comments,
     dedupe_songs,
+    extract_with_shazam,
+    method3_not_run,
+    SOURCE_AI,
 )
 from search import search_candidates, SearchError
 
@@ -228,6 +232,128 @@ Authentication files contain session secrets. **Do not share them or commit them
                 f"Playlist creation failed ({exc.__class__.__name__}): {exc}"
             )
 
+
+
+def render_method3_panel(result: dict[str, Any]) -> dict[str, Any]:
+    """Optional Shazam recognition with manual selection of the results."""
+    video_id = result["video_id"]
+    result_key = f"method3_result_{video_id}"
+    run_key = f"method3_run_{video_id}"
+
+    st.markdown("#### Method 3: Audio recognition (Shazam)")
+    use_m3 = st.checkbox(
+        "Use Method 3: identify songs from the video's audio with Shazam",
+        key=f"use_m3_{video_id}",
+    )
+    if not use_m3:
+        return method3_not_run("Optional: not selected.")
+
+    st.info(
+        "This cuts short audio clips from the video and identifies them with Shazam, "
+        "using the free unofficial `shazamio` library. No account or API token is needed. "
+        "It requires **ffmpeg** installed on this computer, sends the audio clips to "
+        "Shazam's servers, and may stop working if Shazam changes its service."
+    )
+    c1, c2 = st.columns(2)
+    interval = c1.number_input(
+        "Sample every (seconds)", min_value=15, max_value=900, value=90, step=15,
+        key="rec_interval",
+        help="Songs shorter than this can be missed. Use 60-90 for song compilations.",
+    )
+    max_samples = c2.number_input(
+        "Max clips to send", min_value=1, max_value=100, value=20, step=1,
+        key="rec_max_samples",
+        help="Keep this low while testing to avoid being rate-limited.",
+    )
+
+    if st.button("Run audio recognition", key=f"run_m3_{video_id}"):
+        bar = st.progress(0.0, text="Starting…")
+
+        def on_progress(i: int, total: int) -> None:
+            bar.progress(i / total, text=f"Clip {i} of {total}")
+
+        st.session_state[result_key] = extract_with_shazam(
+            result["url"],
+            interval=int(interval),
+            max_samples=int(max_samples),
+            on_progress=on_progress,
+        )
+        # New run -> new editor, so old ticks and edits don't carry over.
+        st.session_state[run_key] = st.session_state.get(run_key, 0) + 1
+        bar.empty()
+
+    stored = st.session_state.get(result_key)
+    if stored is None:
+        st.caption("Click **Run audio recognition**.")
+        return method3_not_run("Selected, but not run yet.")
+
+    # Failed or empty runs: nothing to select.
+    if stored["status"] != "found":
+        return stored
+
+    # --- Selection table ---------------------------------------------------
+    st.write(
+        f"Shazam recognised **{len(stored['songs'])}** song(s). "
+        "Untick any that are wrong and correct titles or artists if needed. "
+        "Only ticked songs are added to the combined list."
+    )
+    df = pd.DataFrame(
+        [
+            {
+                "Include": False,
+                "Timestamp": s["timestamp"],
+                "Title": s["title"],
+                "Artist": s["artist"],
+            }
+            for s in stored["songs"]
+        ]
+    )
+    edited = st.data_editor(
+        df,
+        key=f"m3_editor_{video_id}_{st.session_state.get(run_key, 0)}",
+        hide_index=True,
+        use_container_width=True,
+        num_rows="fixed",
+        column_config={
+            "Include": st.column_config.CheckboxColumn("Song?", default=True),
+            "Timestamp": st.column_config.TextColumn("Timestamp", disabled=True, width="small"),
+            "Title": st.column_config.TextColumn("Song title", width="medium"),
+            "Artist": st.column_config.TextColumn("Artist(s)", width="medium"),
+        },
+    )
+
+    selected_songs: list[dict[str, Any]] = []
+    for _, row in edited.iterrows():
+        if not bool(row["Include"]):
+            continue
+        title = str(row["Title"] or "").strip()
+        if not title:
+            continue
+        selected_songs.append({
+            "title": title,
+            "artist": str(row["Artist"] or "").strip(),
+            "timestamp": str(row["Timestamp"] or ""),
+            "source": SOURCE_AI,
+        })
+
+    if not selected_songs:
+        return {
+            "key": SOURCE_AI,
+            "label": stored["label"],
+            "status": "review",
+            "songs": [],
+            "message": "No songs ticked.",
+            "warnings": ["No Shazam songs are ticked, so none will be added."],
+        }
+    return {
+        "key": SOURCE_AI,
+        "label": stored["label"],
+        "status": "found",
+        "songs": selected_songs,
+        "message": "",
+        "warnings": [],
+    }
+
 def render_extraction_results() -> None:
     result = st.session_state.extraction
 
@@ -278,6 +404,8 @@ def render_extraction_results() -> None:
             "songs": [],
         })
 
+    display_methods.append(render_method3_panel(result))
+
     # Display the status of each extraction method.
     for method in display_methods:
         count = len(method.get("songs", []))
@@ -300,6 +428,8 @@ def render_extraction_results() -> None:
                 f"{method['label']}: select the song lines you want "
                 "and confirm your selection below."
             )
+        elif method["status"] == "not_run":
+            st.caption(f"{method['label']}: not run. {method.get('message', '')}")
         else:
             st.caption(
                 f"{method['label']}: not implemented yet (placeholder)"
@@ -440,7 +570,7 @@ def main() -> None:
             )
     if tracks:
         st.success(f"Loaded {len(tracks)} song(s). You can edit the input and load again.")
-    st.subheader("2. Search")
+        st.subheader("2. Search")
     st.write(
         "Searches run live against YouTube Music (unauthenticated). "
         "The first result is never selected automatically."
@@ -462,29 +592,18 @@ def main() -> None:
         status.empty()
         st.rerun()
 
-        tracks = st.session_state.tracks
-        
-        st.subheader("2. Search")
-        st.write(
-            "Searches run live against YouTube Music (unauthenticated). "
-            "The first result is never selected automatically."
+    tracks = st.session_state.tracks
+    searched = [t for t in tracks if t.get("searched")]
+    empty_results = [t for t in searched if not t.get("candidates") and not t.get("search_error")]
+    errored = [t for t in searched if t.get("search_error")]
+    if searched:
+        st.info(f"Live search finished for {len(searched)} of {len(tracks)} parsed song(s).")
+    if empty_results:
+        st.warning(
+            f"{len(empty_results)} song(s) returned no candidates. Edit the title/singer below and search again."
         )
-        if st.button("Search YouTube Music for all parsed songs", disabled=not tracks):
-            ...  # existing search loop, unchanged, indented one level
-            st.rerun()
-
-        tracks = st.session_state.tracks
-        searched = [t for t in tracks if t.get("searched")]
-        empty_results = [t for t in searched if not t.get("candidates") and not t.get("search_error")]
-        errored = [t for t in searched if t.get("search_error")]
-        if searched:
-            st.info(f"Live search finished for {len(searched)} of {len(tracks)} parsed song(s).")
-        if empty_results:
-            st.warning(
-                f"{len(empty_results)} song(s) returned no candidates. Edit the title/singer below and search again."
-            )
-        if errored:
-            st.error(f"{len(errored)} search(es) failed. See details on each track.")
+    if errored:
+        st.error(f"{len(errored)} search(es) failed. See details on each track.")
 
     tracks = st.session_state.tracks
     st.subheader("3. Verification")

@@ -707,14 +707,170 @@ def extract_from_description_comments(
 # Method 3: AI identification (placeholder, intentionally empty)
 # --------------------------------------------------------------------------
 
-def identify_songs_with_ai(video_url: str) -> list[dict]:
-    """Placeholder for future AI-based song identification."""
-    return []
+# --------------------------------------------------------------------------
+# Method 3: audio recognition with Shazam (free, unofficial `shazamio`)
+# --------------------------------------------------------------------------
+
+import os
 
 
-# --------------------------------------------------------------------------
-# Combine, dedupe, order
-# --------------------------------------------------------------------------
+def method3_not_run(message: str = "Optional: not run.") -> dict[str, Any]:
+    return _result(SOURCE_AI, "not_run", message=message)
+
+
+def identify_songs_with_ai(
+    video_url: str,
+    *,
+    interval: int = 90,
+    max_samples: int = 20,
+    clip_seconds: int = 12,
+    on_progress=None,
+) -> list[dict]:
+    """Sample short audio clips and identify them with Shazam via `shazamio`.
+
+    Needs ffmpeg on PATH. No account or API key.
+    """
+    import asyncio
+    import glob
+    import shutil
+    import tempfile
+    import time
+
+    if not video_url or not re.match(r"^https?://", video_url.strip()):
+        raise ValueError("Please provide a valid HTTP or HTTPS video URL.")
+    if interval < 15 or max_samples < 1:
+        raise ValueError("Interval must be at least 15 seconds and samples at least 1.")
+    if not shutil.which("ffmpeg"):
+        raise RuntimeError("ffmpeg is not installed or not on PATH. Install ffmpeg to cut audio clips.")
+    try:
+        from shazamio import Shazam
+    except ImportError as exc:
+        print(exc)
+        raise RuntimeError("shazamio is not installed. Run: pip install shazamio") from exc
+
+    import yt_dlp
+    from yt_dlp.utils import download_range_func
+
+    with yt_dlp.YoutubeDL(
+        {"quiet": True, "no_warnings": True, "noplaylist": True, "skip_download": True}
+    ) as ydl:
+        info = ydl.extract_info(video_url, download=False)
+    duration = int(info.get("duration") or 0)
+    if duration <= 0:
+        raise RuntimeError("Could not determine the video length.")
+
+    starts = list(range(10, max(duration - clip_seconds, 11), interval))[:max_samples] or [0]
+
+    shazam = Shazam()
+    # Older shazamio versions call this method recognize_song.
+    recognize = getattr(shazam, "recognize", None) or getattr(shazam, "recognize_song")
+
+    loop = asyncio.new_event_loop()
+    detected: list[dict] = []
+    download_failures = 0
+    recognise_failures = 0
+    last_error = ""
+
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            for i, start in enumerate(starts, start=1):
+                if on_progress:
+                    on_progress(i, len(starts))
+
+                opts = {
+                    "quiet": True,
+                    "no_warnings": True,
+                    "noplaylist": True,
+                    "format": "bestaudio/best",
+                    "outtmpl": os.path.join(tmp, f"clip_{i}.%(ext)s"),
+                    "download_ranges": download_range_func(None, [(start, start + clip_seconds)]),
+                    "force_keyframes_at_cuts": True,
+                    "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3"}],
+                }
+                try:
+                    with yt_dlp.YoutubeDL(opts) as ydl:
+                        ydl.download([video_url])
+                except Exception:
+                    download_failures += 1
+                    continue
+
+                files = glob.glob(os.path.join(tmp, f"clip_{i}.*"))
+                if not files:
+                    download_failures += 1
+                    continue
+
+                try:
+                    out = loop.run_until_complete(recognize(files[0]))
+                except Exception as exc:
+                    recognise_failures += 1
+                    last_error = f"{exc.__class__.__name__}: {exc}"
+                    continue
+
+                track = (out or {}).get("track") or {}
+                title = (track.get("title") or "").strip()
+                if title:
+                    detected.append({
+                        "title": title,
+                        "artist": (track.get("subtitle") or "").strip(),
+                        "start_seconds": float(start),
+                        "song_link": track.get("url"),
+                    })
+                time.sleep(1)  # be gentle with the unofficial endpoint
+    finally:
+        loop.close()
+
+    if not detected:
+        if download_failures == len(starts):
+            raise RuntimeError(
+                "Could not download any audio clips (check ffmpeg and the video's availability)."
+            )
+        attempted = len(starts) - download_failures
+        if recognise_failures and recognise_failures == attempted:
+            raise RuntimeError(f"Every Shazam request failed. Last error: {last_error[:200]}")
+
+    # Merge consecutive samples that matched the same song.
+    merged: list[dict] = []
+    for song in detected:
+        if (
+            merged
+            and merged[-1]["title"].casefold() == song["title"].casefold()
+            and merged[-1]["artist"].casefold() == song["artist"].casefold()
+        ):
+            continue
+        merged.append(song)
+    return merged
+
+
+def extract_with_shazam(
+    video_url: str,
+    interval: int = 90,
+    max_samples: int = 20,
+    on_progress=None,
+) -> dict[str, Any]:
+    """Run Method 3 and return a standardized result. Never raises."""
+    try:
+        raw = identify_songs_with_ai(
+            video_url, interval=interval, max_samples=max_samples, on_progress=on_progress
+        )
+    except (ValueError, RuntimeError) as exc:
+        return _result(SOURCE_AI, "failed", message=str(exc)[:300])
+    except Exception as exc:
+        return _result(SOURCE_AI, "failed", message=f"{exc.__class__.__name__}: {exc}"[:300])
+
+    songs: list[dict[str, Any]] = []
+    for item in raw:
+        song = make_song(
+            item.get("title", ""),
+            item.get("artist", ""),
+            seconds_to_timestamp(item["start_seconds"]),
+            SOURCE_AI,
+        )
+        if song:
+            songs.append(song)
+
+    if songs:
+        return _result(SOURCE_AI, "found", songs)
+    return _result(SOURCE_AI, "empty", message="Recognition ran but identified no songs.")
 
 def _norm(text: str) -> str:
     return re.sub(r"[\W_]+", "", (text or "").lower())
@@ -753,6 +909,7 @@ def dedupe_songs(songs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(merged, key=sort_key)
 
 
+
 # --------------------------------------------------------------------------
 # Workflow
 # --------------------------------------------------------------------------
@@ -789,12 +946,6 @@ def run_extraction(url: str, order: str = ORDER_TITLE_ARTIST) -> dict[str, Any]:
         except Exception as exc:  # one method failing must not stop the others
             methods.append(_result(key, "failed", message=f"{exc.__class__.__name__}: {exc}"))
 
-    try:
-        ai_songs = identify_songs_with_ai(canonical) or []
-    except Exception:
-        ai_songs = []
-    methods.append(_result(SOURCE_AI, "not_implemented", ai_songs,
-                           message="Placeholder: not implemented yet."))
 
     combined = dedupe_songs([song for m in methods for song in m["songs"]])
     return {
