@@ -1,14 +1,15 @@
-"""Playlist Assistant (Version 2).
-test youtube description: https://www.youtube.com/watch?v=5ZTjMGlF5v8&t=343s
-test youtube timeline: https://www.youtube.com/watch?v=OIPXLl6B7Cg
+"""Playlist Assistant (Final version).
+
+Paste a song list or a YouTube video link, find the songs, confirm each
+recording on YouTube Music, then export a file or create a YouTube Music playlist.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-import streamlit as st
 import pandas as pd
+import streamlit as st
 
 from export import duplicate_video_ids, to_csv_bytes, to_dataframe, to_json_bytes, verified_tracks
 from parser import parse_song_list
@@ -18,18 +19,18 @@ from playlist_create import (
     build_authenticated_client,
     create_youtube_music_playlist,
 )
+from search import search_candidates, SearchError
 from song_extraction import (
     ORDER_ARTIST_TITLE,
     ORDER_TITLE_ARTIST,
-    run_extraction,
-    songs_to_entries,
-    extract_from_description_comments,
+    SOURCE_AI,
     dedupe_songs,
+    extract_from_description_comments,
     extract_with_shazam,
     method3_not_run,
-    SOURCE_AI,
+    run_extraction,
+    songs_to_entries,
 )
-from search import search_candidates, SearchError
 
 SAMPLE_LIST = """# One song per line: Song, Singer  |  Song - Singer  |  Song<TAB>Singer
 晴天, 周杰伦
@@ -37,6 +38,9 @@ Shape of You, Ed Sheeran
 夜曲 - 周杰伦
 稻香, 周杰伦
 """
+
+DEST_EXPORT = "Export file"
+DEST_YTMUSIC = "Create YouTube Music playlist"
 
 
 def init_state() -> None:
@@ -48,7 +52,7 @@ def init_state() -> None:
         "playlist_result": None,
         "playlist_error": None,
         "input_mode": "Text list",
-        "video_url": "https://www.youtube.com/watch?v=5ZTjMGlF5v8&t=343s",
+        "video_url": "",
         "extraction": None,
         "tracklist_format": "Song - Artist",
     }
@@ -148,13 +152,13 @@ def search_one(track: dict[str, Any]) -> dict[str, Any]:
     return updated
 
 
-
 def render_candidate_label(candidate: dict[str, Any], index: int) -> str:
     title = candidate.get("title") or "(title unavailable)"
     artists = candidate.get("artists") or "(artist unavailable)"
     album = candidate.get("album") or "(album unavailable)"
     duration = candidate.get("duration") or "(duration unavailable)"
     return f"{index}. {title} — {artists} | {album} | {duration}"
+
 
 def reset_for_mode_change() -> None:
     st.session_state.tracks = []
@@ -163,6 +167,7 @@ def reset_for_mode_change() -> None:
     st.session_state.playlist_error = None
     st.session_state.parse_version += 1
     st.session_state.extraction = None
+
 
 def render_export(export_tracks: list[dict[str, Any]]) -> None:
     csv_bytes = to_csv_bytes(st.session_state.tracks)
@@ -233,6 +238,9 @@ Authentication files contain session secrets. **Do not share them or commit them
             )
 
 
+# --------------------------------------------------------------------------
+# YouTube link mode
+# --------------------------------------------------------------------------
 
 def render_method3_panel(result: dict[str, Any]) -> dict[str, Any]:
     """Optional Shazam recognition with manual selection of the results."""
@@ -287,14 +295,12 @@ def render_method3_panel(result: dict[str, Any]) -> dict[str, Any]:
         st.caption("Click **Run audio recognition**.")
         return method3_not_run("Selected, but not run yet.")
 
-    # Failed or empty runs: nothing to select.
     if stored["status"] != "found":
         return stored
 
-    # --- Selection table ---------------------------------------------------
     st.write(
         f"Shazam recognised **{len(stored['songs'])}** song(s). "
-        "Untick any that are wrong and correct titles or artists if needed. "
+        "Tick the songs that are correct, and fix titles or artists if needed. "
         "Only ticked songs are added to the combined list."
     )
     df = pd.DataFrame(
@@ -315,7 +321,7 @@ def render_method3_panel(result: dict[str, Any]) -> dict[str, Any]:
         use_container_width=True,
         num_rows="fixed",
         column_config={
-            "Include": st.column_config.CheckboxColumn("Song?", default=True),
+            "Include": st.column_config.CheckboxColumn("Song?", default=False),
             "Timestamp": st.column_config.TextColumn("Timestamp", disabled=True, width="small"),
             "Title": st.column_config.TextColumn("Song title", width="medium"),
             "Artist": st.column_config.TextColumn("Artist(s)", width="medium"),
@@ -354,6 +360,7 @@ def render_method3_panel(result: dict[str, Any]) -> dict[str, Any]:
         "warnings": [],
     }
 
+
 def render_extraction_results() -> None:
     result = st.session_state.extraction
 
@@ -364,97 +371,64 @@ def render_extraction_results() -> None:
         st.error(result["error"])
         return
 
-    st.markdown(
-        f"**Video:** {result.get('title') or '(title unavailable)'}"
-    )
+    st.markdown(f"**Video:** {result.get('title') or '(title unavailable)'}")
     st.caption(f"URL: {result['url']}")
 
     if result.get("fetch_error"):
-        st.error(
-            f"Video details could not be loaded: {result['fetch_error']}"
-        )
+        st.error(f"Video details could not be loaded: {result['fetch_error']}")
 
-    # Start with the methods already run by run_extraction().
     display_methods = list(result.get("methods", []))
 
-    # Re-render Method 2 on every Streamlit rerun.
-    # This keeps the editable table visible when checkboxes or cells change.
     meta = result.get("meta")
     order = result.get("order", ORDER_TITLE_ARTIST)
 
     if meta:
         try:
-            method2_result = extract_from_description_comments(meta, order)
-            display_methods.append(method2_result)
+            display_methods.append(extract_from_description_comments(meta, order))
         except Exception as exc:
             st.error(
                 "Description/comments extraction failed: "
                 f"{exc.__class__.__name__}: {exc}"
             )
     else:
-        # Show Method 2's failure if video metadata could not be loaded.
         display_methods.append({
             "label": "Description and comments",
             "status": "failed",
-            "message": result.get(
-                "fetch_error",
-                "Video metadata is unavailable."
-            ),
+            "message": result.get("fetch_error", "Video metadata is unavailable."),
             "warnings": [],
             "songs": [],
         })
 
     display_methods.append(render_method3_panel(result))
 
-    # Display the status of each extraction method.
     for method in display_methods:
         count = len(method.get("songs", []))
 
         if method["status"] == "found":
-            st.success(
-                f"{method['label']}: {count} song(s) found"
-            )
+            st.success(f"{method['label']}: {count} song(s) found")
         elif method["status"] == "empty":
-            st.info(
-                f"{method['label']}: ran successfully but found no songs"
-            )
+            st.info(f"{method['label']}: ran successfully but found no songs")
         elif method["status"] == "failed":
-            st.error(
-                f"{method['label']}: failed. "
-                f"{method.get('message', 'Unknown error')}"
-            )
+            st.error(f"{method['label']}: failed. {method.get('message', 'Unknown error')}")
         elif method["status"] == "review":
-            st.info(
-                f"{method['label']}: select the song lines you want "
-                "and confirm your selection below."
-            )
+            st.info(f"{method['label']}: select the songs you want and confirm your selection.")
         elif method["status"] == "not_run":
             st.caption(f"{method['label']}: not run. {method.get('message', '')}")
         else:
-            st.caption(
-                f"{method['label']}: not implemented yet (placeholder)"
-            )
+            st.caption(f"{method['label']}: not implemented yet (placeholder)")
 
         for warning in method.get("warnings", []):
             st.warning(warning)
 
-    # Combine songs from all methods, including the current Method 2 state.
     songs = dedupe_songs([
         song
         for method in display_methods
         for song in method.get("songs", [])
     ])
-
-    # Keep the saved result updated with the latest combined songs.
     result["songs"] = songs
 
-    # Display the combined song list.
     if songs:
-        st.markdown(
-            f"**Combined list: {len(songs)} song(s)** "
-            "(duplicates merged)"
-        )
-
+        st.markdown(f"**Combined list: {len(songs)} song(s)** (duplicates merged)")
         st.dataframe(
             [
                 {
@@ -475,28 +449,27 @@ def render_extraction_results() -> None:
             "video URL or switch Input source to Text list."
         )
 
-    # Continue to song verification using the combined results.
     if st.button(
         "Continue to Song Verification",
         type="primary",
         disabled=not songs,
         key="continue_verification",
     ):
-        st.session_state.tracks = merge_tracks(
-            songs_to_entries(songs)
-        )
+        st.session_state.tracks = merge_tracks(songs_to_entries(songs))
         st.session_state.parse_version += 1
         st.session_state.playlist_result = None
         st.session_state.playlist_error = None
-        
+
+
 def main() -> None:
     st.set_page_config(page_title="Playlist Assistant", layout="wide")
     init_state()
 
     st.title("Playlist Assistant")
     st.caption(
-        "Version 1 — paste a song list, search YouTube Music, confirm recordings, then export. "
-        "Playlist creation uses the unofficial ytmusicapi library and is optional."
+        "Paste a song list or a YouTube link, find and confirm each recording on YouTube Music, "
+        "then export a file or create a YouTube Music playlist. "
+        "Playlist creation is optional and uses the unofficial ytmusicapi library."
     )
 
     st.subheader("1. Input")
@@ -529,7 +502,6 @@ def main() -> None:
             key="video_url",
             placeholder="https://www.youtube.com/watch?v=...",
         )
-
         st.selectbox(
             "Tracklist format",
             ["Song - Artist", "Artist - Song"],
@@ -543,20 +515,17 @@ def main() -> None:
                 if st.session_state.tracklist_format == "Artist - Song"
                 else ORDER_TITLE_ARTIST
             )
-
             with st.spinner("Inspecting video…"):
                 st.session_state.extraction = run_extraction(
                     st.session_state.video_url,
                     order,
                 )
-
             st.session_state.tracks = []
             st.session_state.malformed = []
             st.session_state.parse_version += 1
             st.session_state.playlist_result = None
             st.session_state.playlist_error = None
 
-        # Render saved results on every Streamlit rerun.
         if st.session_state.extraction:
             render_extraction_results()
 
@@ -565,12 +534,11 @@ def main() -> None:
     if malformed:
         st.warning(f"{len(malformed)} malformed line(s) were skipped. Other valid lines were kept.")
         for item in malformed:
-            st.markdown(
-                f"- Line {item['line_number']}: `{item['raw']}` — {item['error']}"
-            )
+            st.markdown(f"- Line {item['line_number']}: `{item['raw']}` — {item['error']}")
     if tracks:
         st.success(f"Loaded {len(tracks)} song(s). You can edit the input and load again.")
-        st.subheader("2. Search")
+
+    st.subheader("2. Search")
     st.write(
         "Searches run live against YouTube Music (unauthenticated). "
         "The first result is never selected automatically."
@@ -612,13 +580,11 @@ def main() -> None:
         "Only confirmed tracks can enter the playlist. Leave a track unconfirmed if none of the results is correct."
     )
     if not tracks:
-        st.caption("Parse a song list to start verification.")
+        st.caption("Parse a song list or extract songs from a video to start verification.")
 
     for track in tracks:
         tid = track["id"]
-        header = (
-            f"Line {track['line_number']}: {track['original_title']} — {track['original_singer']}"
-        )
+        header = f"Line {track['line_number']}: {track['original_title']} — {track['original_singer']}"
         if track.get("confirmed"):
             header += " ✓ confirmed"
         with st.expander(header, expanded=not track.get("confirmed")):
@@ -690,11 +656,9 @@ def main() -> None:
                 )
                 track["confirmed"] = bool(confirmed and selected)
                 if track["confirmed"] and not track.get("included"):
-                    # Newly confirmed tracks are included until the user excludes them.
                     if f"include_{tid}" not in st.session_state:
                         track["included"] = True
 
-    # Persist widget-driven fields back into session_state.tracks
     st.session_state.tracks = tracks
 
     st.subheader("4. Playlist")
@@ -773,22 +737,22 @@ def main() -> None:
     export_tracks = verified_tracks(st.session_state.tracks)
     dest = st.radio(
         "What do you want to do?",
-        ["Export file", "Create YouTube Music playlist"],
+        [DEST_EXPORT, DEST_YTMUSIC],
         horizontal=True,
         key="destination",
     )
-    if dest == "Export file":
+    if dest == DEST_EXPORT:
         render_export(export_tracks)
     else:
         render_ytmusic_create(export_tracks)
 
-    if st.session_state.playlist_error:
-        st.error(st.session_state.playlist_error)
-    if st.session_state.playlist_result:
-        result = st.session_state.playlist_result
-        st.success("Playlist created.")
-        st.markdown(f"[Open playlist in YouTube Music]({result['url']})")
-        st.caption(f"Playlist ID: `{result['playlist_id']}`")
+        if st.session_state.playlist_error:
+            st.error(st.session_state.playlist_error)
+        if st.session_state.playlist_result:
+            result = st.session_state.playlist_result
+            st.success("Playlist created.")
+            st.markdown(f"[Open playlist in YouTube Music]({result['url']})")
+            st.caption(f"Playlist ID: `{result['playlist_id']}`")
 
 
 if __name__ == "__main__":
