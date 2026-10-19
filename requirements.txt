@@ -3,4 +3,4 @@ ytmusicapi>=1.10
 pandas>=2.2
 yt-dlp
 requests
-shazamio
+shazamio==0.8.1
