@@ -1,166 +1,105 @@
-# Text-to-YouTube-Music Playlist Assistant
+# 🎵 Playlist Assistant
 
-Version 1 Python app: paste a list of songs, search **YouTube Music** live, confirm the correct recording for each line, then export CSV/JSON. Optionally create a playlist in a YouTube Music account through **ytmusicapi** (unofficial).
+**Turn YouTube music videos into your own playlists.**
 
-This project is not affiliated with, supported by, or endorsed by Google or YouTube.
+Playlist Assistant helps you identify songs from YouTube videos and compile them into a playlist without manually searching for every track. Whether the song list is provided in text, hidden in the video description or comments, or needs to be identified from the audio itself, Playlist Assistant offers multiple methods to extract your favourite songs.
 
-## What Version 1 does
+## ✨ Features
 
-1. **Input** — paste `Song, Singer`, `Song - Singer`, or `Song<TAB>Singer` (Unicode / Chinese included).
-2. **Search** — live `ytmusicapi` queries (unauthenticated). Up to five candidates per song.
-3. **Verification** — you pick and confirm a recording. Nothing is accepted automatically.
-4. **Playlist** — reorder, exclude, and review possible duplicates (warnings only).
-5. **Export or create** — download CSV/JSON without signing in. Playlist creation is optional and unofficial.
+- 🎶 **Create YouTube Music Playlists** — Collect identified songs and add them to a YouTube Music playlist.
+- 📄 **Export to TXT** — Save extracted song titles and artists to a text file for later use.
+- 🔎 **Multiple Song Identification Methods** — Choose the method that best fits your YouTube video.
+- 💬 **Extract from Descriptions and Comments** — Find song lists hidden in video descriptions and popular comments.
+- 🎧 **Audio Recognition with ShazamIO** — Identify songs directly from audio when song information is not available as text.
 
-Out of scope: audio recognition, video download, Spotify, auto-accepting search hits, accounts/databases.
+## 🚀 How It Works
 
-## Requirements
+Playlist Assistant provides three methods for identifying songs.
 
-- **Python 3.12 or 3.13** (3.13 is preferred). Do not assume Python 3.15 has wheels for every dependency.
-- Internet access for YouTube Music search (and for optional playlist creation).
+### Method 1: Extract from a Text List
 
-## Setup (macOS)
+**Best for:** Videos with an existing song list, timestamps, or a copied list of song titles.
 
-```bash
-cd /path/to/playlist-assistant
-python3.13 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-pip install -r requirements.txt
-```
+1. Provide a text list containing song titles and, if available, artist names.
+2. Let Playlist Assistant process and organize the song information.
+3. Review the extracted songs.
+4. Add the songs to YouTube Music or export them to a TXT file.
 
-If `python3.13` is not installed, `python3.12` is fine:
+### Method 2: Extract from YouTube Descriptions and Comments
 
-```bash
-python3.12 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
+**Best for:** Music compilations where the song list may be included in the description or comments.
 
-Run:
+1. Provide the YouTube video URL.
+2. Retrieve available song information from the video description.
+3. Examine relevant comments, including popular comments, for additional song lists and timestamps.
+4. Review the extracted results and select the songs you want.
+5. Export the selected songs to TXT or create a YouTube Music playlist.
 
-```bash
-streamlit run app.py
-```
+This method helps discover songs even when the uploader has not provided a complete song list in one place.
 
-The app opens in your browser (usually http://localhost:8501).
+### Method 3: Identify Songs Using ShazamIO
 
-## Setup (Windows)
+**Best for:** Videos that do not provide sufficient song information in their descriptions or comments.
 
-In PowerShell:
+1. Provide the YouTube video URL.
+2. Playlist Assistant processes the available audio in segments.
+3. ShazamIO attempts to recognize the songs using audio fingerprints.
+4. Review the recognized song titles and artists.
+5. Export the results to TXT or add the songs to YouTube Music.
 
-```powershell
-cd \path\to\playlist-assistant
-py -3.13 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-pip install -r requirements.txt
-streamlit run app.py
-```
+**Note:** Audio recognition depends on audio quality, song length, background noise, and the recognition service's ability to identify a track. Some songs may not be recognized correctly.
 
-If execution policy blocks activation:
+## 🛠️ Available Output Options
 
-```powershell
-Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
-```
+| Output                 | Description                                                                                     |
+| ---------------------- | ----------------------------------------------------------------------------------------------- |
+| YouTube Music Playlist | Collect identified tracks into a playlist for convenient listening.                             |
+| TXT File               | Export song titles and artist names into a plain-text file for editing, sharing, or future use. |
 
-Then activate again. Python 3.12: `py -3.12 -m venv .venv`.
+## 📋 Example
 
-Command Prompt:
-
-```cmd
-.venv\Scripts\activate.bat
-pip install -r requirements.txt
-streamlit run app.py
-```
-
-## Using the app
-
-1. Paste a list. Lines starting with `#` and blank lines are ignored.
-2. Click **Parse song list**. Malformed lines are listed; valid lines are kept. Edit the box and parse again whenever you need.
-3. Click **Search YouTube Music for all parsed songs**. Progress is shown for the batch.
-4. Open each song, compare title / artist / album / duration, open the YouTube Music link if needed, select a candidate, and tick **Confirm this recording**.
-5. If none of the results is right, change the title/singer on that row and click **Search again**. Leave the song unconfirmed if you still have no match.
-6. In **Playlist**, use ↑ / ↓ to reorder and **Include** to drop a confirmed track without losing the rest of your work.
-7. Download **CSV** (UTF-8 with BOM, Excel-friendly) or **JSON**. Only confirmed, included tracks are exported, in your order.
-
-Selections persist across Streamlit reruns. Confirming one song does not clear another.
-
-## Optional YouTube Music playlist creation (unofficial)
-
-`ytmusicapi` is **not** an official Google YouTube Music playlist API. Requests emulate the website. Google can change endpoints at any time. Search and export work **without** authentication; playlist creation needs a local auth file.
-
-**Treat `browser.json` / `oauth.json` as passwords.** Do not share them, screenshot them, or commit them. This repo’s `.gitignore` excludes typical auth filenames.
-
-Follow the current docs, not stale blog posts: https://ytmusicapi.readthedocs.io/
-
-### Browser headers (`browser.json`)
-
-1. Install the project dependencies (so the `ytmusicapi` CLI is available).
-2. In a browser, open https://music.youtube.com and stay logged in.
-3. Open developer tools → Network. Trigger an authenticated POST to `browse`.
-4. Copy the request headers as described in [Browser authentication](https://ytmusicapi.readthedocs.io/en/stable/setup/browser.html).
-5. Run `ytmusicapi browser` in a terminal and paste the headers (on macOS Terminal, header paste length is limited; see the docs for `pbpaste`).
-6. In the app, upload the generated JSON. Choose title, description, and privacy (`PRIVATE`, `UNLISTED`, or `PUBLIC` as supported by the library). Submit **only** after you have confirmed tracks.
-
-### OAuth (`oauth.json`)
-
-As of November 2024, OAuth also needs a Google Cloud **OAuth client ID and secret** (application type: TVs and Limited Input devices). See [OAuth authentication](https://ytmusicapi.readthedocs.io/en/stable/setup/oauth.html).
-
-```bash
-ytmusicapi oauth
-```
-
-Upload `oauth.json` and enter the client ID and secret in the app. Those values are not stored in this project.
-
-If creation succeeds, the app shows a YouTube Music playlist link. If the library returns an error dict instead of an ID, no success message is shown.
-
-## Troubleshooting
-
-| Problem | What to try |
-| --- | --- |
-| `pip` fails to build wheels | Use Python **3.12 or 3.13**, not 3.15. Upgrade pip: `python -m pip install --upgrade pip`. |
-| `ModuleNotFoundError: ytmusicapi` / `streamlit` | Activate the virtual environment, then `pip install -r requirements.txt`. |
-| Search returns nothing | Edit the title/singer and search that row again. Some songs are missing from YouTube Music. |
-| Connection / timeout errors | Check the network. Retry; YouTube may throttle bursts of searches. |
-| `Please provide authentication before using this function` | Search should not need auth. Playlist creation does. Upload a current auth file. |
-| Auth / 401 / expired session | Generate a new `browser.json` or `oauth.json`. Logging out of YouTube in the browser invalidates browser headers. |
-| OAuth setup errors | Confirm the Cloud client is “TVs and Limited Input devices” and pass both client ID and secret. |
-| CSV garbled in Excel | The file is UTF-8 with BOM. Open via Data → From Text/CSV and choose UTF-8 if needed. |
-| Streamlit widget state looks stale | Parse again after large edits, or refresh the page. Confirmed tracks are stored in session state for the current session only. |
-
-## Project layout
+Given a YouTube music compilation, Playlist Assistant might produce a list like this:
 
 ```text
-playlist-assistant/
-├── app.py                 # Streamlit UI
-├── parser.py              # Song-list parsing
-├── search.py              # Live YouTube Music search + candidate formatting
-├── export.py              # CSV/JSON export
-├── playlist_create.py     # Optional unofficial playlist creation
-├── requirements.txt
-├── README.md
-├── .gitignore
-└── tests/
-    └── test_parser_and_export.py
+1. Song Title One - Artist A
+2. Song Title Two - Artist B
+3. Song Title Three - Artist C
 ```
 
-## Tests actually run vs live integrations
+You can then review the results and choose your preferred output.
 
-**Automated (no YouTube account):**
+## ⚙️ Getting Started
 
-```bash
-python -m unittest discover -s tests -v
-python -m py_compile app.py parser.py search.py export.py playlist_create.py
-```
+1. Clone this repository.
+2. Install the project's dependencies.
+3. Configure any required credentials or API tokens.
+4. Start the application and provide a YouTube video URL or a song list.
+5. Select an extraction method and choose your output format.
 
-These cover parsing (including malformed lines and Unicode), candidate formatting (no invented metadata), mocked search, duplicate warnings without deletion, and CSV/JSON export (UTF-8, confirmed/included only).
+Refer to the project's source code and dependency files for the specific installation commands and configuration requirements.
 
-**Live YouTube Music search** needs the network and YouTube’s current responses. Run the Streamlit app and search a short list. Results can change.
+### API Configuration
 
-**Authenticated playlist creation** is not executed in automated tests (it would need your session file). Create a private playlist only after you have a local auth file.
+Some extraction methods may require external services or credentials. If using a method that requires an API token, obtain the token from the relevant provider and enter it when prompted by the application.
 
-## License / API notice
+For ShazamIO, follow the implementation and dependency requirements in the project.
 
-Use of YouTube Music is subject to Google’s terms. This tool is for personal workflow convenience. Playlist creation may break without notice because it depends on unofficial client behavior.
-# playlist_assistant
+**Security tip:** Do not commit API tokens, passwords, or other secrets to your Git repository. Store sensitive configuration in environment variables or a local `.env` file and exclude that file from version control.
+
+## ⚠️ Limitations
+
+- Song recognition may be incomplete or inaccurate.
+- YouTube descriptions and comments may not contain a complete song list.
+- Duplicate tracks or different versions of the same song may require manual review.
+- Playlist creation may depend on YouTube Music authentication and track availability.
+- Third-party services and platform changes may affect extraction results.
+
+## 🎯 Project Goal
+
+Playlist Assistant aims to make music discovery and playlist creation easier by combining text extraction, YouTube metadata analysis, and audio recognition in one workflow.
+
+**Spend less time identifying songs and more time enjoying the music.** 🎶
+
+## 📄 Disclaimer
+
+This project is intended for personal music discovery and playlist management. Please respect copyright, platform terms of service, and the privacy and usage policies of any third-party services used.
