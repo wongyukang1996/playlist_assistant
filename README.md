@@ -1,5 +1,7 @@
 # 🎵 Playlist Assistant
 
+Test the website on https://playlistassistant-j96hyohxizcyz5qzvwqqxq.streamlit.app/
+
 **Turn YouTube music videos into your own playlists.**
 
 Playlist Assistant helps you identify songs from YouTube videos and compile them into a playlist without manually searching for every track. Whether the song list is provided in text, hidden in the video description or comments, or needs to be identified from the audio itself, Playlist Assistant offers multiple methods to extract your favourite songs.
